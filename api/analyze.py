@@ -123,7 +123,31 @@ async def _analyze(data: dict) -> dict:
             timeout=_TIMEOUT,
         )
         response.raise_for_status()
-        tx_hash = response.headers.get("x-processing-hash") or response.headers.get("x-payment-response")
+        all_headers = dict(response.headers)
+
+        tx_hash = None
+        for hdr in ("payment-response", "x-payment-response", "PAYMENT-RESPONSE", "X-PAYMENT-RESPONSE"):
+            raw = response.headers.get(hdr)
+            if raw:
+                try:
+                    pay = json.loads(raw)
+                    tx_hash = (
+                        pay.get("transaction_hash")
+                        or pay.get("txHash")
+                        or pay.get("tx_hash")
+                        or pay.get("transactionHash")
+                    )
+                    if tx_hash:
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    tx_hash = raw
+                    break
+        if not tx_hash:
+            tx_hash = (
+                response.headers.get("x-processing-hash")
+                or response.headers.get("x-transaction-hash")
+                or response.headers.get("x-tx-hash")
+            )
         result = json.loads((await response.aread()).decode())
         choices = result.get("choices", [])
         if not choices:
@@ -137,6 +161,7 @@ async def _analyze(data: dict) -> dict:
         parsed["tee_timestamp"]    = result.get("tee_timestamp")
         parsed["transaction_hash"] = tx_hash
         parsed["wallet_address"]   = _WALLET_ADDRESS
+        parsed["_debug_headers"]   = {k: v for k, v in all_headers.items() if "hash" in k.lower() or "payment" in k.lower() or "tx" in k.lower() or "transaction" in k.lower()}
         return parsed
     finally:
         await http.aclose()
