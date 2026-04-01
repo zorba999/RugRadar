@@ -1,11 +1,71 @@
+import asyncio
 import json
-import sys
 import os
+import re
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import opengradient as og
+from dotenv import load_dotenv
 
-from analyzer import run_analysis
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
+
+SYSTEM_PROMPT = """You are an expert Web3 security analyst specializing in detecting rug pulls, scams, and high-risk token launches.
+You MUST respond with ONLY valid JSON in this exact format:
+{
+  "rug_pull_score": <integer 0-100>,
+  "risk_level": "<VERY LOW | LOW | MEDIUM | HIGH | CRITICAL>",
+  "summary": "<2-3 sentence overall assessment>",
+  "categories": {
+    "tokenomics": { "score": <integer 0-100>, "findings": ["<finding1>", "<finding2>"] },
+    "vesting":    { "score": <integer 0-100>, "findings": ["<finding1>", "<finding2>"] },
+    "team":       { "score": <integer 0-100>, "findings": ["<finding1>", "<finding2>"] },
+    "liquidity":  { "score": <integer 0-100>, "findings": ["<finding1>", "<finding2>"] },
+    "contract":   { "score": <integer 0-100>, "findings": ["<finding1>", "<finding2>"] }
+  },
+  "red_flags": ["<flag1>", "<flag2>"],
+  "green_flags": ["<flag1>", "<flag2>"],
+  "recommendation": "<AVOID | EXTREME CAUTION | PROCEED WITH CAUTION | RELATIVELY SAFE>"
+}
+Score meaning: 0 = no risk, 100 = definite rug pull."""
+
+
+def _build_prompt(d: dict) -> str:
+    return f"""Analyze this token launch for rug pull risk:
+TOKEN: {d.get('token_name')} (${d.get('token_symbol')}) on {d.get('chain')}
+SUPPLY: {d.get('total_supply')} | PRICE: {d.get('token_price')} | HARD CAP: {d.get('hard_cap')}
+TOKENOMICS: Team {d.get('team_allocation')}% | Investors {d.get('investor_allocation')}% | Public {d.get('public_allocation')}% | Ecosystem {d.get('ecosystem_allocation')}% | Liquidity {d.get('liquidity_allocation')}%
+VESTING: {d.get('vesting_schedule') or 'Not provided'}
+LIQUIDITY LOCKED: {d.get('liquidity_locked')} for {d.get('lock_duration')} on {d.get('dex')}
+TEAM DOXXED: {d.get('team_doxxed')} | PREVIOUS PROJECTS: {d.get('previous_projects')}
+TEAM WALLETS: {d.get('team_wallets') or 'Not provided'}
+AUDITED: {d.get('audited')} by {d.get('audit_firm')} | MINT FUNCTION: {d.get('mint_function')} | OWNERSHIP RENOUNCED: {d.get('ownership_renounced')}
+NOTES: {d.get('additional_info') or 'None'}
+Respond with JSON only."""
+
+
+async def _analyze(data: dict) -> dict:
+    private_key = os.getenv("OG_PRIVATE_KEY")
+    if not private_key:
+        raise ValueError("OG_PRIVATE_KEY not set")
+    llm = og.LLM(private_key=private_key)
+    result = await llm.chat(
+        model=og.TEE_LLM.CLAUDE_SONNET_4_6,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _build_prompt(data)},
+        ],
+        max_tokens=1200,
+        temperature=0.0,
+    )
+    raw = result.chat_output["content"].strip()
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if m:
+        parsed = json.loads(m.group())
+        parsed["tee_signature"] = result.tee_signature
+        parsed["tee_timestamp"] = result.tee_timestamp
+        return parsed
+    raise ValueError(f"Could not parse JSON: {raw[:200]}")
 
 
 class handler(BaseHTTPRequestHandler):
@@ -17,9 +77,8 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            data = json.loads(body)
-            result = run_analysis(data)
+            data = json.loads(self.rfile.read(length))
+            result = asyncio.run(_analyze(data))
             self._respond(200, result)
         except Exception as e:
             self._respond(500, {"detail": str(e)})
@@ -37,3 +96,6 @@ class handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
