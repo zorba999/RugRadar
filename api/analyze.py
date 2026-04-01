@@ -28,6 +28,8 @@ _TIMEOUT      = 90
 _TEE_REGISTRY_ABI = [{"inputs":[{"internalType":"uint8","name":"teeType","type":"uint8"}],"name":"getActiveTEEs","outputs":[{"components":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"paymentAddress","type":"address"},{"internalType":"string","name":"endpoint","type":"string"},{"internalType":"bytes","name":"publicKey","type":"bytes"},{"internalType":"bytes","name":"tlsCertificate","type":"bytes"},{"internalType":"bytes32","name":"pcrHash","type":"bytes32"},{"internalType":"uint8","name":"teeType","type":"uint8"},{"internalType":"bool","name":"enabled","type":"bool"},{"internalType":"uint256","name":"registeredAt","type":"uint256"},{"internalType":"uint256","name":"lastHeartbeatAt","type":"uint256"}],"internalType":"struct TEERegistry.TEEInfo[]","name":"","type":"tuple[]"}],"stateMutability":"view","type":"function"}]
 
 _tee_cache: dict = {}
+_WALLET_ADDRESS: str = ""  # populated on first use
+
 
 SYSTEM_PROMPT = """You are an expert Web3 security analyst specializing in detecting rug pulls, scams, and high-risk token launches.
 You MUST respond with ONLY valid JSON in this exact format:
@@ -92,7 +94,9 @@ async def _analyze(data: dict) -> dict:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_REQUIRED
 
+    global _WALLET_ADDRESS
     account = Account.from_key(private_key)
+    _WALLET_ADDRESS = account.address
     signer = EthAccountSigner(account)
     x402 = x402Client()
     register_exact_evm_client(x402, signer, networks=[_NETWORK])
@@ -129,9 +133,10 @@ async def _analyze(data: dict) -> dict:
         if not m:
             raise ValueError(f"Could not parse JSON: {content[:200]}")
         parsed = json.loads(m.group())
-        parsed["tee_signature"]  = result.get("tee_signature")
-        parsed["tee_timestamp"]  = result.get("tee_timestamp")
+        parsed["tee_signature"]    = result.get("tee_signature")
+        parsed["tee_timestamp"]    = result.get("tee_timestamp")
         parsed["transaction_hash"] = tx_hash
+        parsed["wallet_address"]   = _WALLET_ADDRESS
         return parsed
     finally:
         await http.aclose()
