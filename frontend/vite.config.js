@@ -7,7 +7,10 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/analyze': 'http://localhost:8000',
-      '/health': 'http://localhost:8000',
+      '/health':  'http://localhost:8000',
     }
+  },
+  define: {
+    'import.meta.env.VITE_API_BASE': JSON.stringify(process.env.VITE_API_BASE || '')
   }
 })
