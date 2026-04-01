@@ -1,5 +1,8 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from analyzer import run_analysis
@@ -52,3 +55,12 @@ def analyze(data: TokenData):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+if os.path.exists(DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_spa(full_path: str):
+        return FileResponse(os.path.join(DIST, "index.html"))

@@ -242,8 +242,7 @@ export default function AnalyzerWizard({ onResult, onBack }) {
     setLoading(true)
     setError(null)
     try {
-      const API_BASE = import.meta.env.VITE_API_BASE || ''
-      const res = await fetch(`${API_BASE}/analyze`, {
+      const res = await fetch(`${import.meta.env.VITE_API_BASE || ''}/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
