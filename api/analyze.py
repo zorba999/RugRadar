@@ -119,6 +119,7 @@ async def _analyze(data: dict) -> dict:
             timeout=_TIMEOUT,
         )
         response.raise_for_status()
+        tx_hash = response.headers.get("x-processing-hash") or response.headers.get("x-payment-response")
         result = json.loads((await response.aread()).decode())
         choices = result.get("choices", [])
         if not choices:
@@ -128,8 +129,9 @@ async def _analyze(data: dict) -> dict:
         if not m:
             raise ValueError(f"Could not parse JSON: {content[:200]}")
         parsed = json.loads(m.group())
-        parsed["tee_signature"] = result.get("tee_signature")
-        parsed["tee_timestamp"] = result.get("tee_timestamp")
+        parsed["tee_signature"]  = result.get("tee_signature")
+        parsed["tee_timestamp"]  = result.get("tee_timestamp")
+        parsed["transaction_hash"] = tx_hash
         return parsed
     finally:
         await http.aclose()
