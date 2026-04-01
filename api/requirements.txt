@@ -1,2 +1,5 @@
-opengradient>=0.1.0
-python-dotenv>=1.0.0
+og-x402
+eth-account
+web3
+httpx
+python-dotenv
