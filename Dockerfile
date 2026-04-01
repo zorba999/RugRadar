@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists
 WORKDIR /app
 COPY . .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.dev.txt
 
 RUN cd frontend && npm install && npm run build
 
