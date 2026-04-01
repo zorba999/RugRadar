@@ -114,7 +114,7 @@ async def _analyze(data: dict) -> dict:
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {_PLACEHOLDER}",
-                "X-SETTLEMENT-TYPE": "batch_hashed",
+                "X-SETTLEMENT-TYPE": "individual_full",
             },
             timeout=_TIMEOUT,
         )
