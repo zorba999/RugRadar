@@ -50,7 +50,7 @@ async def _analyze(data: dict) -> dict:
         raise ValueError("OG_PRIVATE_KEY not set")
 
     llm = og.LLM(private_key=private_key)
-    await llm.ensure_opg_approval(min_allowance=5)
+    llm.ensure_opg_approval(min_allowance=5)
 
     completion = await llm.chat(
         model=og.TEE_LLM.CLAUDE_SONNET_4_6,
