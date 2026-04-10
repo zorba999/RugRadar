@@ -2,34 +2,13 @@ import asyncio
 import json
 import os
 import re
-import ssl
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from eth_account import Account
-from web3 import Web3
-from x402 import x402Client
-from x402.http.clients import x402HttpxClient
-from x402.mechanisms.evm import EthAccountSigner
-from x402.mechanisms.evm.exact.register import register_exact_evm_client
-from x402.mechanisms.evm.upto.register import register_upto_evm_client
+import opengradient as og
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
-
-_RPC_URL      = "https://ogevmdevnet.opengradient.ai"
-_REGISTRY     = "0x4e72238852f3c918f4E4e57AeC9280dDB0c80248"
-_NETWORK      = "eip155:84532"
-_MODEL        = "claude-sonnet-4-6"
-_CHAT_PATH    = "/v1/chat/completions"
-_PLACEHOLDER  = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-_TIMEOUT      = 90
-
-_TEE_REGISTRY_ABI = [{"inputs":[{"internalType":"uint8","name":"teeType","type":"uint8"}],"name":"getActiveTEEs","outputs":[{"components":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"paymentAddress","type":"address"},{"internalType":"string","name":"endpoint","type":"string"},{"internalType":"bytes","name":"publicKey","type":"bytes"},{"internalType":"bytes","name":"tlsCertificate","type":"bytes"},{"internalType":"bytes32","name":"pcrHash","type":"bytes32"},{"internalType":"uint8","name":"teeType","type":"uint8"},{"internalType":"bool","name":"enabled","type":"bool"},{"internalType":"uint256","name":"registeredAt","type":"uint256"},{"internalType":"uint256","name":"lastHeartbeatAt","type":"uint256"}],"internalType":"struct TEERegistry.TEEInfo[]","name":"","type":"tuple[]"}],"stateMutability":"view","type":"function"}]
-
-_tee_cache: dict = {}
-_WALLET_ADDRESS: str = ""  # populated on first use
-
 
 SYSTEM_PROMPT = """You are an expert Web3 security analyst specializing in detecting rug pulls, scams, and high-risk token launches.
 You MUST respond with ONLY valid JSON in this exact format:
@@ -65,106 +44,36 @@ NOTES: {d.get('additional_info') or 'None'}
 Respond with JSON only."""
 
 
-def _get_tee_endpoint() -> tuple:
-    if _tee_cache:
-        return _tee_cache["endpoint"], _tee_cache.get("cert"), _tee_cache.get("payment")
-    w3 = Web3(Web3.HTTPProvider(_RPC_URL))
-    contract = w3.eth.contract(address=Web3.to_checksum_address(_REGISTRY), abi=_TEE_REGISTRY_ABI)
-    tees = contract.functions.getActiveTEEs(0).call()
-    if not tees:
-        raise RuntimeError("No active LLM TEEs found in registry")
-    tee = tees[0]
-    endpoint, tls_cert, payment = tee[2], bytes(tee[4]), tee[1]
-    _tee_cache.update({"endpoint": endpoint, "cert": tls_cert, "payment": payment})
-    return endpoint, tls_cert, payment
-
-
 async def _analyze(data: dict) -> dict:
     private_key = os.getenv("OG_PRIVATE_KEY")
     if not private_key:
         raise ValueError("OG_PRIVATE_KEY not set")
 
-    endpoint, tls_cert, _ = _get_tee_endpoint()
+    llm = og.LLM(private_key=private_key)
+    await llm.ensure_opg_approval(min_allowance=5)
 
-    ssl_ctx = None
-    if tls_cert:
-        pem = ssl.DER_cert_to_PEM_cert(tls_cert)
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_ctx.load_verify_locations(cadata=pem)
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+    completion = await llm.chat(
+        model=og.TEE_LLM.CLAUDE_SONNET_4_6,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": _build_prompt(data)},
+        ],
+        max_tokens=1200,
+        temperature=0.0,
+        x402_settlement_mode=og.x402SettlementMode.INDIVIDUAL_FULL,
+    )
 
-    global _WALLET_ADDRESS
-    account = Account.from_key(private_key)
-    _WALLET_ADDRESS = account.address
-    signer = EthAccountSigner(account)
-    x402 = x402Client()
-    register_exact_evm_client(x402, signer, networks=[_NETWORK])
-    register_upto_evm_client(x402, signer, networks=[_NETWORK])
+    raw = completion.chat_output["content"].strip()
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        raise ValueError(f"Could not parse JSON from LLM response: {raw[:200]}")
 
-    http = x402HttpxClient(x402, verify=ssl_ctx if ssl_ctx else True)
-    try:
-        response = await http.post(
-            endpoint + _CHAT_PATH,
-            json={
-                "model": _MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": _build_prompt(data)},
-                ],
-                "max_tokens": 1200,
-                "temperature": 0.0,
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {_PLACEHOLDER}",
-                "X-SETTLEMENT-TYPE": "individual_full",
-            },
-            timeout=_TIMEOUT,
-        )
-        response.raise_for_status()
-        all_headers = dict(response.headers)
-
-        tx_hash = None
-        for hdr in ("payment-response", "x-payment-response", "PAYMENT-RESPONSE", "X-PAYMENT-RESPONSE"):
-            raw = response.headers.get(hdr)
-            if raw:
-                try:
-                    pay = json.loads(raw)
-                    tx_hash = (
-                        pay.get("transaction_hash")
-                        or pay.get("txHash")
-                        or pay.get("tx_hash")
-                        or pay.get("transactionHash")
-                    )
-                    if tx_hash:
-                        break
-                except (json.JSONDecodeError, AttributeError):
-                    tx_hash = raw
-                    break
-        if not tx_hash:
-            tx_hash = (
-                response.headers.get("x-processing-hash")
-                or response.headers.get("x-transaction-hash")
-                or response.headers.get("x-tx-hash")
-            )
-        result = json.loads((await response.aread()).decode())
-        choices = result.get("choices", [])
-        if not choices:
-            raise RuntimeError(f"No choices in response: {result}")
-        content = choices[0].get("message", {}).get("content", "")
-        m = re.search(r"\{.*\}", content, re.DOTALL)
-        if not m:
-            raise ValueError(f"Could not parse JSON: {content[:200]}")
-        parsed = json.loads(m.group())
-        parsed["tee_signature"]    = result.get("tee_signature")
-        parsed["tee_timestamp"]    = result.get("tee_timestamp")
-        parsed["transaction_hash"] = tx_hash
-        parsed["wallet_address"]   = _WALLET_ADDRESS
-        parsed["_debug_headers"]   = {k: v for k, v in all_headers.items() if "hash" in k.lower() or "payment" in k.lower() or "tx" in k.lower() or "transaction" in k.lower()}
-        return parsed
-    finally:
-        await http.aclose()
+    parsed = json.loads(m.group())
+    parsed["tee_signature"]    = completion.tee_signature
+    parsed["tee_timestamp"]    = completion.tee_timestamp
+    parsed["transaction_hash"] = completion.transaction_hash
+    parsed["wallet_address"]   = llm._wallet_account.address
+    return parsed
 
 
 class handler(BaseHTTPRequestHandler):
